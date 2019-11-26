@@ -130,3 +130,53 @@ def classify_process():
 
             # sleep for a small amount
             time.sleep(SERVER_SLEEP)
+
+
+@app.route("/classify", methods=["POST"])
+def predict():
+
+    data = {"success": False}
+
+    if flask.request.method == "POST":
+        if flask.request.files.get("image"):
+
+            # image in PIL format
+            image = flask.request.files["image"].read()
+            image = Image.open(io.BytesIO(image))
+            image = prepare_image(image, (IMAGE_WIDTH, IMAGE_HEIGHT))
+
+            image = image.copy(order="C")  # NumPy array is C-contiguous for serialization
+
+            k = str(uuid.uuid4())  # generate classification ID
+            d = {"id": k, "image": base64_encode_image(image)}
+            db.rpush(IMAGE_QUEUE, json.dumps(d))
+
+            while True:
+
+                classified = db.get(k)  # attempt to get output predictions
+
+                if classified is not None:
+
+                    classified = classified.decode("utf-8")
+                    data["predictions"] = json.loads(classified)
+
+                    db.delete(k)
+                    break
+
+                time.sleep(CLIENT_SLEEP)
+
+            data["success"] = True
+
+        return flask.jsonify(data)
+
+
+if __name__ == "__main__":
+
+    print("* Starting model service...")
+    t = Thread(target=classify_process, args=())
+    t.daemon = True
+    t.start()
+
+    # start the web server
+    print("* Starting web service...")
+    app.run()
