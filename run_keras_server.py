@@ -1,4 +1,5 @@
 # import the necessary packages
+import yaml
 from keras.applications import ResNet50
 from keras.preprocessing.image import img_to_array
 from keras.applications import imagenet_utils
@@ -13,6 +14,7 @@ import time
 import json
 import sys
 import io
+import logging.config
 
 # initialize constants used to control image spatial dimensions and
 # data type
@@ -134,44 +136,53 @@ def classify_process():
 
 @app.route("/classify", methods=["POST"])
 def predict():
+    app.logger.debug('entered classify endpoint, ImageNet')
 
     data = {"success": False}
 
     if flask.request.method == "POST":
+        app.logger.debug('POST method check successful')
         if flask.request.files.get("image"):
+            app.logger.debug('image exists check successful')
 
             # image in PIL format
             image = flask.request.files["image"].read()
             image = Image.open(io.BytesIO(image))
             image = prepare_image(image, (IMAGE_WIDTH, IMAGE_HEIGHT))
+            app.logger.debug('image converted to PIL')
 
             image = image.copy(order="C")  # NumPy array is C-contiguous for serialization
 
             k = str(uuid.uuid4())  # generate classification ID
             d = {"id": k, "image": base64_encode_image(image)}
             db.rpush(IMAGE_QUEUE, json.dumps(d))
+            app.logger.debug('image pushed to the queue')
 
             while True:
 
                 classified = db.get(k)  # attempt to get output predictions
+                app.logger.debug('got predictions from the queue')
 
                 if classified is not None:
+                    app.logger.debug('predictions exist')
 
                     classified = classified.decode("utf-8")
                     data["predictions"] = json.loads(classified)
 
                     db.delete(k)
+                    app.logger.debug('image is removed from the queue')
+
                     break
 
                 time.sleep(CLIENT_SLEEP)
 
             data["success"] = True
+            app.logger.debug('successfully predicted')
 
         return flask.jsonify(data)
 
 
 if __name__ == "__main__":
-
     print("* Starting model service...")
     t = Thread(target=classify_process, args=())
     t.daemon = True
@@ -179,4 +190,11 @@ if __name__ == "__main__":
 
     # start the web server
     print("* Starting web service...")
+    logging.config.dictConfig(yaml.load(open('logging/logging.conf')))
+
+    logfile = logging.getLogger('file')
+    logconsole = logging.getLogger('console')
+    logfile.debug("Debug FILE")
+    logconsole.debug("Debug CONSOLE")
+
     app.run()
