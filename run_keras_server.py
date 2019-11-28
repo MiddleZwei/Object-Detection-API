@@ -1,4 +1,3 @@
-# import the necessary packages
 import yaml
 from keras.applications import ResNet50
 from keras.preprocessing.image import img_to_array
@@ -16,8 +15,7 @@ import sys
 import io
 import logging.config
 
-# initialize constants used to control image spatial dimensions and
-# data type
+# initialize constants used to control image spatial dimensions and data type
 IMAGE_WIDTH = 224
 IMAGE_HEIGHT = 224
 IMAGE_CHANS = 3
@@ -31,7 +29,7 @@ CLIENT_SLEEP = 0.25
 
 # initialize our Flask application, Redis server, and Keras model
 app = flask.Flask(__name__)
-db = redis.StrictRedis(host="localhost", port=6379, db=0)
+db = redis.Redis(host="localhost", port=6379, db=0)
 model = None
 
 
@@ -56,81 +54,65 @@ def base64_decode_image(a, dtype, shape):
 
 
 def prepare_image(image, target):
-    # if the image mode is not RGB, convert it
+
     if image.mode != "RGB":
         image = image.convert("RGB")
 
-    # resize the input image and preprocess it
     image = image.resize(target)
     image = img_to_array(image)
     image = np.expand_dims(image, axis=0)
     image = imagenet_utils.preprocess_input(image)
 
-    # return the processed image
     return image
 
 
 def classify_process():
-    # load the pre-trained Keras model (here we are using a model
-    # pre-trained on ImageNet and provided by Keras, but you can
-    # substitute in your own networks just as easily)
-    print("* Loading model...")
-    model = ResNet50(weights="imagenet")
-    print("* Model loaded")
+    app.logger.debug("* Loading model...")
+    model = ResNet50(weights="imagenet")  # IDEA: own models
+    app.logger.debug("* Model loaded")
 
-    # continually poll for new images to classify
     while True:
-        # attempt to grab a batch of images from the database, then
-        # initialize the image IDs and batch of images themselves
+
+        app.logger.debug('Attempting to grab a batch of images from db')
         queue = db.lrange(IMAGE_QUEUE, 0, BATCH_SIZE - 1)
         imageIDs = []
         batch = None
 
-        # loop over the queue
         for q in queue:
-            # deserialize the object and obtain the input image
             q = json.loads(q.decode("utf-8"))
             image = base64_decode_image(q["image"], IMAGE_DTYPE,
                                         (1, IMAGE_HEIGHT, IMAGE_WIDTH, IMAGE_CHANS))
+            app.logger.debug("Deserialized image")
 
-            # check to see if the batch list is None
             if batch is None:
                 batch = image
-
-            # otherwise, stack the data
             else:
                 batch = np.vstack([batch, image])
 
-            # update the list of image IDs
             imageIDs.append(q["id"])
 
-            # check to see if we need to process the batch
             if len(imageIDs) > 0:
-                # classify the batch
+
                 print("* Batch size: {}".format(batch.shape))
                 preds = model.predict(batch)
                 results = imagenet_utils.decode_predictions(preds)
+                app.logger.debug("Classified a batch of images and decoded predictions")
 
-                # loop over the image IDs and their corresponding set of
-                # results from our model
                 for (imageID, resultSet) in zip(imageIDs, results):
-                    # initialize the list of output predictions
+
                     output = []
 
-                    # loop over the results and add them to the list of
-                    # output predictions
                     for (imagenetID, label, prob) in resultSet:
                         r = {"label": label, "probability": float(prob)}
                         output.append(r)
+                        app.logger.debug("Broke down predictions for the image {}".format(imagenetID))
 
-                    # store the output predictions in the database, using
-                    # the image ID as the key so we can fetch the results
                     db.set(imageID, json.dumps(output))
+                    app.logger.debug("Stored predictions in the db")
 
-                # remove the set of images from our queue
                 db.ltrim(IMAGE_QUEUE, len(imageIDs), -1)
+                app.logger.debug("Removed the set of img from the db")
 
-            # sleep for a small amount
             time.sleep(SERVER_SLEEP)
 
 
@@ -142,59 +124,61 @@ def predict():
 
     if flask.request.method == "POST":
         app.logger.debug('POST method check successful')
-        if flask.request.files.get("image"):
-            app.logger.debug('image exists check successful')
 
-            # image in PIL format
-            image = flask.request.files["image"].read()
-            image = Image.open(io.BytesIO(image))
-            image = prepare_image(image, (IMAGE_WIDTH, IMAGE_HEIGHT))
-            app.logger.debug('image converted to PIL')
+        image = flask.request.files["image"].read()
+        image = Image.open(io.BytesIO(image))
+        image = prepare_image(image, (IMAGE_WIDTH, IMAGE_HEIGHT))
+        app.logger.debug('image converted to PIL')
 
-            image = image.copy(order="C")  # NumPy array is C-contiguous for serialization
+        image = image.copy(order="C")
+        app.logger.debug('NumPy array is C-contiguous for serialization')
 
-            k = str(uuid.uuid4())  # generate classification ID
-            d = {"id": k, "image": base64_encode_image(image)}
-            db.rpush(IMAGE_QUEUE, json.dumps(d))
-            app.logger.debug('image pushed to the queue')
+        k = str(uuid.uuid4())
+        app.logger.debug('ID is generated and equals {}'.format(k))
 
-            while True:
+        d = {"id": k, "image": base64_encode_image(image)}
+        app.logger.debug('ID assigned to the image')
 
-                classified = db.get(k)  # attempt to get output predictions
-                app.logger.debug('got predictions from the queue')
+        db.rpush(IMAGE_QUEUE, json.dumps(d))
+        app.logger.debug('image pushed to the queue')
 
-                if classified is not None:
-                    app.logger.debug('predictions exist')
+        while True:
 
-                    classified = classified.decode("utf-8")
-                    data["predictions"] = json.loads(classified)
+            classified = db.get(k)
+            app.logger.debug('getting predictions from the queue')
+            app.logger.debug('classified = {} '.format(classified))
 
-                    db.delete(k)
-                    app.logger.debug('image is removed from the queue')
+            if classified is not None:
+                app.logger.debug('predictions exist')
 
-                    break
+                classified = classified.decode("utf-8")
+                data["predictions"] = json.loads(classified)
 
-                time.sleep(CLIENT_SLEEP)
+                db.delete(k)
+                app.logger.debug('image is removed from the queue')
 
-            data["success"] = True
-            app.logger.debug('successfully predicted')
+                break
+
+            time.sleep(CLIENT_SLEEP)
+
+        data["success"] = True
+        app.logger.debug('successfully predicted')
 
         return flask.jsonify(data)
 
 
 if __name__ == "__main__":
-    print("* Starting model service...")
-    t = Thread(target=classify_process, args=())
-    t.daemon = True
-    t.start()
-
-    # start the web server
-    print("* Starting web service...")
+    print("* Setting up logger...")
     logging.config.dictConfig(yaml.load(open('logging/logging.conf')))
-
     logfile = logging.getLogger('file')
     logconsole = logging.getLogger('console')
     logfile.debug("Debug FILE")
     logconsole.debug("Debug CONSOLE")
 
+    print("* Starting model service...")
+    t = Thread(target=classify_process, args=())
+    t.daemon = True
+    t.start()
+
+    print("* Starting web service...")
     app.run()
