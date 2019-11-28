@@ -73,7 +73,6 @@ def classify_process():
 
     while True:
 
-        app.logger.debug('Attempting to grab a batch of images from db')
         queue = db.lrange(IMAGE_QUEUE, 0, BATCH_SIZE - 1)
         imageIDs = []
         batch = None
